@@ -22,3 +22,6 @@ class InventoryPage:
 
     def get_first_item_price(self):
         return self._first_item_price.inner_text()
+    
+    def add_tshirt_to_cart(self):
+        self.page.locator("#add-to-cart-sauce-labs-bolt-t-shirt").click()

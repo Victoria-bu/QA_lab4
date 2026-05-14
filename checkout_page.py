@@ -19,3 +19,9 @@ class CheckoutPage:
 
     def get_success_message(self):
         return self._success_message.inner_text()
+    
+    def remove_item(self):
+        self.page.locator("#remove-sauce-labs-bolt-t-shirt").click()
+
+    def is_cart_empty(self):
+        return self.page.locator(".shopping_cart_badge").count() == 0

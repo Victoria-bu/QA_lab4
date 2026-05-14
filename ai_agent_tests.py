@@ -7,13 +7,10 @@ import asyncio
 import os
 import sys
 from browser_use_sdk import AsyncBrowserUse
-from google import genai
 
 BROWSER_USE_API_KEY = os.environ.get("BROWSER_USE_API_KEY", "YOUR_BROWSER_USE_API_KEY")
-GOOGLE_API_KEY  = os.environ.get("GOOGLE_API_KEY", "AIzaSyBIIR2eJNyMU1rhrvgSta_huumRi4OuQYU")
-
 bu_client = AsyncBrowserUse(api_key=BROWSER_USE_API_KEY)
-gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+
 
 CHECKOUT_E2E_PROMPT = """
 You are a QA automation agent. Execute the following test case exactly:
@@ -78,88 +75,39 @@ End your response with RESULT: PASS or RESULT: FAIL, then a short explanation.
 """
 
 
-def determine_status(result_text: str) -> str:
-    """
-    Спочатку парсимо RESULT: PASS/FAIL з тексту агента.
-    Якщо агент не написав явно — пробуємо Gemini як fallback.
-    """
-    upper = result_text.upper()
-
-    if "RESULT: PASS" in upper:
-        return "PASS"
-    if "RESULT: FAIL" in upper:
-        return "FAIL"
-
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=f"""You are a QA evaluator. Based on this browser agent output, did the test pass or fail? Reply with only: RESULT: PASS or RESULT: FAIL
-
-Agent output:
-{result_text}
-""",
-        )
-        verdict = response.text.strip().upper()
-        if "RESULT: PASS" in verdict:
-            return "PASS"
-        if "RESULT: FAIL" in verdict:
-            return "FAIL"
-    except Exception as e:
-        print(f"  (Gemini fallback недоступний: {e})")
-
-    positive = ["successfully", "thank you", "completed", "verified", "confirmed"]
-    negative = ["failed", "error", "could not", "unable", "not found"]
-    pos = sum(1 for w in positive if w in result_text.lower())
-    neg = sum(1 for w in negative if w in result_text.lower())
-    return "PASS" if pos > neg else "FAIL"
-
-
 async def run_test(test_name: str, prompt: str) -> dict:
     print(f"\n  ЗАПУСК: {test_name}\n")
 
-    try:
-        task = await bu_client.tasks.create_task(task=prompt)
-        task_id = task.id
-        print(f"  Task ID: {task_id}")
+    task = await bu_client.tasks.create_task(task=prompt)
+    task_id = task.id
+    print(f"  Task ID: {task_id}")
 
-        max_wait = 300
-        interval = 5
-        elapsed  = 0
-        result_text = ""
+    # Чекаємо завершення задачі (polling кожні 5 секунд)
+    elapsed = 0
+    while elapsed < 300:
+        await asyncio.sleep(5)
+        elapsed += 5
 
-        while elapsed < max_wait:
-            await asyncio.sleep(interval)
-            elapsed += interval
+        status_obj = await bu_client.tasks.get_task_status(task_id)
+        state = getattr(status_obj, "status", "unknown")
+        print(f"  [{elapsed:3d}s] статус: {state}")
 
-            status_obj = await bu_client.tasks.get_task_status(task_id)
-            state = getattr(status_obj, "status", "unknown")
-            print(f"  [{elapsed:3d}s] статус: {state}")
+        if state in ("finished", "completed", "done", "success"):
+            full = await bu_client.tasks.get_task(task_id)
+            result_text = getattr(full, "output", None) or str(full)
+            break
+        elif state in ("failed", "error", "cancelled"):
+            result_text = f"Task ended with state: {state}"
+            break
+    else:
+        result_text = "Timeout: task did not finish within 5 minutes."
 
-            if state in ("finished", "completed", "done", "success"):
-                full = await bu_client.tasks.get_task(task_id)
-                result_text = (
-                    getattr(full, "output", None)
-                    or getattr(full, "result", None)
-                    or getattr(status_obj, "output", None)
-                    or str(full)
-                )
-                break
-            elif state in ("failed", "error", "cancelled"):
-                result_text = f"Task ended with state: {state}"
-                break
+    print(f"\n  Результат агента:\n{result_text}\n")
 
-        if not result_text:
-            result_text = "Timeout: task did not finish within 5 minutes."
+    upper = result_text.upper()
+    status = "PASS" if "RESULT: PASS" in upper else "FAIL"
+    return {"test": test_name, "status": status, "agent_output": result_text}
 
-        print(f"\n  Результат агента:\n{result_text}\n")
-
-        status = determine_status(result_text)
-
-        return {"test": test_name, "status": status, "agent_output": result_text}
-
-    except Exception as exc:
-        print(f"\n   ПОМИЛКА: {exc}")
-        return {"test": test_name, "status": "ERROR", "details": str(exc)}
 
 async def run_all_tests():
     tests = [
@@ -167,31 +115,19 @@ async def run_all_tests():
         ("TC-02: Sort by Price",  SORT_PROMPT),
         ("TC-03: Remove Product", REMOVE_PRODUCT_PROMPT),
     ]
+
     results = []
     for name, prompt in tests:
         results.append(await run_test(name, prompt))
 
     print("\n  ЗВІТ\n")
     for r in results:
-        print(f"{r['test']:<35} {r['status']}")
+        icon = "✅" if r["status"] == "PASS" else "❌"
+        print(f"  {icon}  {r['test']:<35}  {r['status']}")
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
-    errors = sum(1 for r in results if r["status"] == "ERROR")
-    print(f"\n  Всього: {len(results)}  |  ✅ {passed}  |  ❌ {failed}  |  ⚠️  {errors}\n")
+    print(f"\n  Всього: {len(results)}  |  ✅ {passed}  |  ❌ {failed}\n")
 
-async def run_single(key: str):
-    mapping = {
-        "checkout": ("TC-01: Checkout E2E",   CHECKOUT_E2E_PROMPT),
-        "sort":     ("TC-02: Sort by Price",  SORT_PROMPT),
-        "remove":   ("TC-03: Remove Product", REMOVE_PRODUCT_PROMPT),
-    }
-    if key not in mapping:
-        print(f"Невідомий тест '{key}'. Доступні: {list(mapping)}")
-        return
-    await run_test(*mapping[key])
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        asyncio.run(run_single(sys.argv[1].lower()))
-    else:
-        asyncio.run(run_all_tests())
+    asyncio.run(run_all_tests())

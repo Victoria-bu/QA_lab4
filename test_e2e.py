@@ -30,3 +30,19 @@ def test_sort_prices_low_to_high(page):
     inventory.sort_by_price_low_to_high()
 
     assert inventory.get_first_item_price() == "$7.99"
+
+def test_add_and_remove_product(page):
+    login = LoginPage(page)
+    inventory = InventoryPage(page)
+    checkout = CheckoutPage(page)
+
+    login.navigate()
+    login.login("standard_user", "secret_sauce")
+    inventory.add_tshirt_to_cart()
+    
+    assert inventory.get_cart_items_count() == "1"
+
+    inventory.go_to_cart()
+    checkout.remove_item()
+
+    assert checkout.is_cart_empty() is True
